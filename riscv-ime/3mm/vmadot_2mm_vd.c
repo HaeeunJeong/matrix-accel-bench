@@ -99,12 +99,15 @@ void Gemm_Baseline_vmadot(size_t M, size_t N, size_t K,
             packB[n * Tk + k] = B_rm[LOGICAL(K_tile * Tk + k, J * Tj + n, N)];
 
         __asm__ volatile(
+            // 누산기 C 타일 불러오기 및 초기화
             "vsetvli      t0, zero, e32, m2 \n\t"
             "vle32.v      v28, (%[C])       \n\t"
+            // Packing된 A, B 행렬 타일 로드 및 연산
             "vsetvli      t0, zero, e8, m1  \n\t"
             "vle8.v       v0, (%[A])        \n\t"
             "vle8.v       v1, (%[B])        \n\t"
             "vmadot       v28, v0, v1       \n\t"
+            // 연산 결과를 C 타일에 다시 저장
             "vsetvli      t0, zero, e32, m2 \n\t"
             "vse32.v      v28, (%[C])       \n\t"
             : : [A] "r"(packA), [B] "r"(packB), [C] "r"(C_tile)
@@ -144,12 +147,15 @@ void Gemm_HalfVD_vmadot(size_t M, size_t N, size_t K,
         const int8_t *B_tile_start = &B_vd[(K_tile * num_J + J) * 32];
 
         __asm__ volatile(
+            // 누산기 C 타일 불러오기 및 초기화
             "vsetvli      t0, zero, e32, m2 \n\t"
             "vle32.v      v28, (%[C])       \n\t"
+            // Packing된 A 타일과 VD로 레이아웃된 B 타일 로드 및 연산
             "vsetvli      t0, zero, e8, m1  \n\t"
             "vle8.v       v0, (%[A])        \n\t"
             "vle8.v       v1, (%[B])        \n\t"
             "vmadot       v28, v0, v1       \n\t"
+            // 연산 결과를 C 타일에 다시 저장
             "vsetvli      t0, zero, e32, m2 \n\t"
             "vse32.v      v28, (%[C])       \n\t"
             : : [A] "r"(packA), [B] "r"(B_tile_start), [C] "r"(C_tile)
@@ -180,20 +186,23 @@ void Gemm_VD_vmadot_Fast(size_t M, size_t N, size_t K,
       size_t B_stride = num_J * 32;
 
       __asm__ volatile(
+          // 누산기(v28) 0으로 초기화
           "vsetvli      t0, zero, e32, m2 \n\t"
           "vxor.vv      v28, v28, v28     \n\t"
+          // 행렬 A, B 타일 로드 및 연산 환경 설정
           "vsetvli      t0, zero, e8, m1  \n\t"
-          "mv           t1, %[num_K]      \n\t"
-          "mv           t2, %[A]          \n\t"
-          "mv           t3, %[B]          \n\t"
-          "1:                             \n\t"
-          "vle8.v       v0, (t2)          \n\t"
-          "vle8.v       v1, (t3)          \n\t"
-          "vmadot       v28, v0, v1       \n\t"
-          "addi         t2, t2, 32        \n\t"
-          "add          t3, t3, %[B_str]  \n\t"
-          "addi         t1, t1, -1        \n\t"
-          "bnez         t1, 1b            \n\t"
+          "mv           t1, %[num_K]      \n\t" // K 타일 루프 카운터
+          "mv           t2, %[A]          \n\t" // A 타일 주소
+          "mv           t3, %[B]          \n\t" // B 타일 주소
+          "1:                             \n\t" // 로컬 라벨 (루프 시작)
+          "vle8.v       v0, (t2)          \n\t" // A 타일 로드 (32바이트)
+          "vle8.v       v1, (t3)          \n\t" // B 타일 로드 (32바이트)
+          "vmadot       v28, v0, v1       \n\t" // dot-product 연산
+          "addi         t2, t2, 32        \n\t" // 다음 A 타일로 주소 이동 (+32)
+          "add          t3, t3, %[B_str]  \n\t" // 다음 B 타일로 주소 이동 (+stride)
+          "addi         t1, t1, -1        \n\t" // 루프 카운터 1 감소
+          "bnez         t1, 1b            \n\t" // 카운터가 0이 아니면 1번 라벨로 반복 분기 (backward)
+          // 연산된 C 타일 결과 저장
           "vsetvli      t0, zero, e32, m2 \n\t"
           "vse32.v      v28, (%[C])       \n\t"
           : : [A] "r"(A_tile_start), [B] "r"(B_tile_start), [C] "r"(C_tile),

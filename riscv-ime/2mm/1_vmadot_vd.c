@@ -63,12 +63,16 @@ void Referece_Gemm_packB(size_t M, size_t N, size_t K, const int8_t *A,
   }
 }
 
+// B 행렬을 vmadot 연산에 적합한 메모리 레이아웃으로 재정렬(Packing)하는 함수
+// 실제 산술 연산(GEMM)은 포함하지 않습니다.
 void Gemm_packB(size_t ROW, size_t COL, const int8_t *B, int8_t *packedB) {
 
   __asm__ volatile("addi         t6, zero, 8             \n\t"
                    "vsetvli      t0, zero, e8, mf8       \n\t"
 
+                   // %= : inline assembly가 여러 번 인라인될 때 라벨명 충돌을 막기 위한 고유 번호 생성
                    "LOOP_ROW%=:                          \n\t"
+                   // ROW 루프 카운터를 1 감소
                    "addi         %[ROW], %[ROW], -1      \n\t"
 
                    "LOOP_COL%=:                          \n\t"
@@ -77,6 +81,7 @@ void Gemm_packB(size_t ROW, size_t COL, const int8_t *B, int8_t *packedB) {
                    "vsse8.v      v0, (%[DST]), t6        \n\t"
                    "addi         %[DST], %[DST], 1       \n\t"
 
+                   // 카운터가 0이 아니면 루프 반복
                    "bnez         %[ROW], LOOP_ROW%=      \n\t"
 
                    : [SRC] "+r"(B), [DST] "+r"(packedB), [ROW] "+r"(ROW)
@@ -84,22 +89,30 @@ void Gemm_packB(size_t ROW, size_t COL, const int8_t *B, int8_t *packedB) {
                    : "cc", "t6", "t0");
 }
 
+// 사전에 Packing된 행렬(packedB)을 사용하여 vmadot 행렬 연산을 수행하는 함수
 void Gemm_vmadot(size_t M, size_t N, size_t K, const int8_t *A, const int8_t *B,
                  int32_t *C) {
 
-  __asm__ volatile("vsetvli      t0, zero, e32, m2       \n\t"
+  __asm__ volatile(
+                   // 누산기(v28) 초기화
+                   "vsetvli      t0, zero, e32, m2       \n\t"
                    "vxor.vv      v28, v28, v28           \n\t"
 
+                   // 행렬 데이터 로드 및 연산 설정
                    "vsetvli      t0, zero, e8, m1        \n\t"
                    "LOOP_K%=:                            \n\t"
+                   // 행렬 A 로드 및 포인터 증가
                    "vle8.v       v0, (%[A])              \n\t"
                    "addi         %[A], %[A], 32          \n\t"
 
+                   // Packing된 행렬 B 로드 및 포인터 증가
                    "vle8.v       v1, (%[B])              \n\t"
                    "addi         %[B], %[B], 32          \n\t"
 
+                   // dot-product 연산
                    "vmadot       v28, v0, v1             \n\t"
 
+                   // 결과 C 저장
                    "vsetvli      t0, zero, e32, m2       \n\t"
                    "vse32.v      v28, (%[C])             \n\t"
                    : [A] "+r"(A), [B] "+r"(B), [C] "+r"(C), [M] "+r"(M)
@@ -107,16 +120,21 @@ void Gemm_vmadot(size_t M, size_t N, size_t K, const int8_t *A, const int8_t *B,
                    : "cc");
 }
 
+// Virtual Dimension(VD)을 활용하여 Packing 과정 없이(Zero-overhead) vmadot을 수행하는 함수
 void Gemm_VD_vmadot(const int8_t *A, const int8_t *B_vd, int32_t *C) {
     __asm__ volatile(
+        // 누산기(v28) 초기화
         "vsetvli      t0, zero, e32, m2 \n\t"
         "vxor.vv      v28, v28, v28     \n\t"
 
+        // 행렬 데이터 로드
         "vsetvli      t0, zero, e8, m1  \n\t"
         "vle8.v       v0, (%[A])        \n\t"  // A는 그대로 로드
         "vle8.v       v1, (%[B])        \n\t"  // B는 VD 덕분에 패킹 없이 바로 로드!
+        // dot-product 연산
         "vmadot       v28, v0, v1       \n\t"
 
+        // 결과 C 저장
         "vsetvli      t0, zero, e32, m2 \n\t"
         "vse32.v      v28, (%[C])       \n\t"
         : 
@@ -125,6 +143,7 @@ void Gemm_VD_vmadot(const int8_t *A, const int8_t *B_vd, int32_t *C) {
     );
 }
 
+// Packing 과정과 vmadot 연산을 하나의 함수 안에서 연속적으로(Fused) 수행하는 함수
 void Gemm_nonpackB_vmadot(size_t M, size_t N, size_t K, const int8_t *A,
                           const int8_t *B, int32_t *C) {
 
@@ -132,30 +151,35 @@ void Gemm_nonpackB_vmadot(size_t M, size_t N, size_t K, const int8_t *A,
 
   __asm__ volatile(
       // --- 1. Pack B on the fly ---
+      // t6에 stride(8) 설정, t5에 루프 카운터(8) 설정
       "addi         t6, zero, 8             \n\t"
       "vsetvli      t0, zero, e8, mf8       \n\t"
       "addi         t5, zero, 8             \n\t"
       "mv           t4, %[B]                \n\t"
       "mv           t3, %[PACKB]            \n\t"
 
+      // 로컬 버퍼에 행렬 B를 Packing하는 루프
       "LOOP_ROW_FUSED%=:                    \n\t"
-      "addi         t5, t5, -1              \n\t"
-      "vle8.v       v0, (t4)                \n\t"
-      "addi         t4, t4, 4               \n\t"
-      "vsse8.v      v0, (t3), t6            \n\t"
-      "addi         t3, t3, 1               \n\t"
-      "bnez         t5, LOOP_ROW_FUSED%=    \n\t"
+      "addi         t5, t5, -1              \n\t" // 루프 카운터 감소
+      "vle8.v       v0, (t4)                \n\t" // 원본 B 데이터 로드
+      "addi         t4, t4, 4               \n\t" // 원본 포인터 증가
+      "vsse8.v      v0, (t3), t6            \n\t" // stride(8) 간격으로 저장 (Packing)
+      "addi         t3, t3, 1               \n\t" // 대상 포인터 증가
+      "bnez         t5, LOOP_ROW_FUSED%=    \n\t" // 카운터가 0이 될 때까지 반복
 
       // --- 2. vmadot ---
+      // 누산기 초기화
       "vsetvli      t0, zero, e32, m2       \n\t"
       "vxor.vv      v28, v28, v28           \n\t"
 
+      // A 행렬과 Packing된 B 로드 후 연산
       "vsetvli      t0, zero, e8, m1        \n\t"
-      "vle8.v       v0, (%[A])              \n\t"
-      "vle8.v       v1, (%[PACKB])          \n\t"
-      "vmadot       v28, v0, v1             \n\t"
+      "vle8.v       v0, (%[A])              \n\t" // 행렬 A 로드
+      "vle8.v       v1, (%[PACKB])          \n\t" // 방금 생성한 Packing된 B 로드
+      "vmadot       v28, v0, v1             \n\t" // dot-product 연산
 
       // --- 3. Store C ---
+      // 연산 결과 메모리 저장
       "vsetvli      t0, zero, e32, m2       \n\t"
       "vse32.v      v28, (%[C])             \n\t"
 

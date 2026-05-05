@@ -88,12 +88,15 @@ void Gemm_Baseline_vmadot(size_t M, size_t N, size_t K, const int8_t *A,
 
         // 3. vmadot execution
         __asm__ volatile(
+            // 누산기(v28) 초기화
             "vsetvli      t0, zero, e32, m2 \n\t"
             "vle32.v      v28, (%[C])       \n\t"
+            // 행렬 A, B 로드 및 연산
             "vsetvli      t0, zero, e8, m1  \n\t"
             "vle8.v       v0, (%[A])        \n\t"
             "vle8.v       v1, (%[B])        \n\t"
             "vmadot       v28, v0, v1       \n\t"
+            // 결과 C 타일 저장
             "vsetvli      t0, zero, e32, m2 \n\t"
             "vse32.v      v28, (%[C])       \n\t"
             :
@@ -139,24 +142,26 @@ void Gemm_VD_Tiled_Transposed_vmadot(size_t M, size_t N, size_t K, const int8_t 
 
       // Inline Assembly for computing 1 tile of C (4x4)
       __asm__ volatile(
+          // 누산기(v28) 0으로 초기화
           "vsetvli      t0, zero, e32, m2 \n\t"
           "vxor.vv      v28, v28, v28     \n\t"   // v28 = Accumulator 초기화
 
           "vsetvli      t0, zero, e8, m1  \n\t"
-          "mv           t1, %[num_K]      \n\t"
-          "mv           t2, %[A]          \n\t"
-          "mv           t3, %[B]          \n\t"
+          "mv           t1, %[num_K]      \n\t"   // t1에 K 타일 루프 카운터(num_K) 설정
+          "mv           t2, %[A]          \n\t"   // A 타일의 시작 주소
+          "mv           t3, %[B]          \n\t"   // B 타일의 시작 주소
 
           "LOOP_K_TILE%=:                 \n\t"
           "vle8.v       v0, (t2)          \n\t"   // A 타일 로드 (한 번에 32바이트)
           "vle8.v       v1, (t3)          \n\t"   // B 타일 로드 (VD 덕분에 패킹 없이 32바이트 로드!)
-          "vmadot       v28, v0, v1       \n\t"   // 연산
+          "vmadot       v28, v0, v1       \n\t"   // dot-product 연산
           
-          "addi         t2, t2, 32        \n\t"   // 다음 A 타일 주소 (32바이트 뒤)
-          "add          t3, t3, %[B_str]  \n\t"   // 다음 B 타일 주소
-          "addi         t1, t1, -1        \n\t"
-          "bnez         t1, LOOP_K_TILE%= \n\t"
+          "addi         t2, t2, 32        \n\t"   // 다음 A 타일 주소 계산 (32바이트 이동)
+          "add          t3, t3, %[B_str]  \n\t"   // 다음 B 타일 주소 계산 (B_stride 만큼 이동)
+          "addi         t1, t1, -1        \n\t"   // 루프 카운터 1 감소
+          "bnez         t1, LOOP_K_TILE%= \n\t"   // 카운터가 0이 아니면 루프 반복
 
+          // 최종 연산된 C 타일 결과 저장
           "vsetvli      t0, zero, e32, m2 \n\t"
           "vse32.v      v28, (%[C])       \n\t"   // 최종 C 타일 저장
           :
