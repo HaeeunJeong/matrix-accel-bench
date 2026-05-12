@@ -6,7 +6,7 @@
     .align 2
 
 // C ABI Signature:
-// void ime_i8_gemm_4x8x4_i8i8i32(
+// void ime_i8_gemm_4x8x4_i8ii32(
 //     const int8_t *A_tile_row, // a0
 //     const int8_t *B_tile_col, // a1
 //     int32_t *C_tile,          // a2
