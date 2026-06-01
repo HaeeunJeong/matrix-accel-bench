@@ -1,15 +1,14 @@
 TARGET=pure_c_vd
+CFLAGS=-O2 -mcpu=spacemit-x60 -mabi=lp64d -Wall
 
 # Check architecture
 UNAME_M := $(shell uname -m)
 
 ifeq ($(UNAME_M),riscv64)
     CC=gcc
-    CFLAGS=-O3 -march=rv64gcv -ftree-vectorize
     EXEC=taskset -c 0 ./$(TARGET)
 else
     CC=riscv64-unknown-linux-gnu-gcc
-    CFLAGS=-O3 -march=rv64gcv -ftree-vectorize
 endif
 
 $(TARGET) : $(TARGET).c
