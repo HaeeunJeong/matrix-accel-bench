@@ -74,3 +74,147 @@ ime_i8_gemm_4x8x4_i8i8i32_acc:
 
 .L_return:
     ret
+
+// ============================================================================
+// RM-RM (Row-Major A, Row-Major B) Mode
+// ============================================================================
+// C ABI Signature:
+// void ime_i8_gemm_4x8x4_i8i8i32_rm_rm(
+//     const int8_t *A,          // a0
+//     const int8_t *B,          // a1
+//     int32_t *C,               // a2
+//     size_t num_K,             // a3
+//     size_t A_K_stride,        // a4
+//     size_t B_K_stride,        // a5
+//     size_t lda,               // a6
+//     size_t ldb                // a7
+// );
+
+    .global ime_i8_gemm_4x8x4_i8i8i32_rm_rm
+    .type ime_i8_gemm_4x8x4_i8i8i32_rm_rm, @function
+    .global ime_i8_gemm_4x8x4_i8i8i32_rm_rm_acc
+    .type ime_i8_gemm_4x8x4_i8i8i32_rm_rm_acc, @function
+    .align 2
+
+ime_i8_gemm_4x8x4_i8i8i32_rm_rm:
+    beqz        a3, .L_rm_rm_return
+
+    // C 타일 누산기(v28) 0으로 초기화
+    vsetvli     t0, zero, e32, m2
+    vxor.vv     v28, v28, v28
+    j           .L_rm_rm_setup
+
+ime_i8_gemm_4x8x4_i8i8i32_rm_rm_acc:
+    beqz        a3, .L_rm_rm_return
+
+    // 기존 C 타일 로드
+    vsetvli     t0, zero, e32, m2
+    vle32.v     v28, (a2)
+
+.L_rm_rm_setup:
+    // A Index Vector (v4): offset = (vid / 8) * lda + (vid % 8)
+    vsetvli     t0, zero, e32, m4
+    vid.v       v4
+    vsrl.vi     v12, v4, 3
+    vand.vi     v16, v4, 7
+    vmul.vx     v20, v12, a6
+    vadd.vv     v4, v20, v16
+
+    // B Index Vector (v8) RM 모드: offset = (vid % 8) * ldb + (vid / 8)
+    vid.v       v8
+    vmul.vx     v20, v16, a7
+    vadd.vv     v8, v20, v12
+
+    // K 타일 루프 환경 설정 (e8 data, m1 data, m4 index)
+    vsetvli     t0, zero, e8, m1
+
+.L_rm_rm_loop:
+    // A 타일, B 타일 Indexed Load
+    vluxei32.v  v0, (a0), v4
+    vluxei32.v  v1, (a1), v8
+
+    // vmadot 누산 연산
+    vmadot      v28, v0, v1
+
+    // 포인터 및 카운터 갱신
+    add         a0, a0, a4
+    add         a1, a1, a5
+    addi        a3, a3, -1
+
+    bnez        a3, .L_rm_rm_loop
+
+    // 최종 결과 저장
+    vsetvli     t0, zero, e32, m2
+    vse32.v     v28, (a2)
+
+.L_rm_rm_return:
+    ret
+
+// ============================================================================
+// RM-CM (Row-Major A, Col-Major B) Mode
+// ============================================================================
+// C ABI Signature:
+// void ime_i8_gemm_4x8x4_i8i8i32_rm_cm(
+//     const int8_t *A,          // a0
+//     const int8_t *B,          // a1
+//     int32_t *C,               // a2
+//     size_t num_K,             // a3
+//     size_t A_K_stride,        // a4
+//     size_t B_K_stride,        // a5
+//     size_t lda,               // a6
+//     size_t ldb                // a7
+// );
+
+    .global ime_i8_gemm_4x8x4_i8i8i32_rm_cm
+    .type ime_i8_gemm_4x8x4_i8i8i32_rm_cm, @function
+    .global ime_i8_gemm_4x8x4_i8i8i32_rm_cm_acc
+    .type ime_i8_gemm_4x8x4_i8i8i32_rm_cm_acc, @function
+    .align 2
+
+ime_i8_gemm_4x8x4_i8i8i32_rm_cm:
+    beqz        a3, .L_rm_cm_return
+
+    vsetvli     t0, zero, e32, m2
+    vxor.vv     v28, v28, v28
+    j           .L_rm_cm_setup
+
+ime_i8_gemm_4x8x4_i8i8i32_rm_cm_acc:
+    beqz        a3, .L_rm_cm_return
+
+    vsetvli     t0, zero, e32, m2
+    vle32.v     v28, (a2)
+
+.L_rm_cm_setup:
+    // A Index Vector (v4): offset = (vid / 8) * lda + (vid % 8)
+    vsetvli     t0, zero, e32, m4
+    vid.v       v4
+    vsrl.vi     v12, v4, 3
+    vand.vi     v16, v4, 7
+    vmul.vx     v20, v12, a6
+    vadd.vv     v4, v20, v16
+
+    // B Index Vector (v8) CM 모드: offset = (vid / 8) * ldb + (vid % 8)
+    // A와 인덱스 로직이 동일 (stride만 ldb 사용)
+    vid.v       v8
+    vmul.vx     v20, v12, a7
+    vadd.vv     v8, v20, v16
+
+    vsetvli     t0, zero, e8, m1
+
+.L_rm_cm_loop:
+    vluxei32.v  v0, (a0), v4
+    vluxei32.v  v1, (a1), v8
+
+    vmadot      v28, v0, v1
+
+    add         a0, a0, a4
+    add         a1, a1, a5
+    addi        a3, a3, -1
+
+    bnez        a3, .L_rm_cm_loop
+
+    vsetvli     t0, zero, e32, m2
+    vse32.v     v28, (a2)
+
+.L_rm_cm_return:
+    ret
