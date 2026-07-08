@@ -87,7 +87,8 @@ ime_i8_gemm_4x8x4_i8i8i32_acc:
 //     size_t A_K_stride,        // a4
 //     size_t B_K_stride,        // a5
 //     size_t lda,               // a6
-//     size_t ldb                // a7
+//     size_t ldb,               // a7
+//     size_t ldc                // 0(sp)
 // );
 
     .global ime_i8_gemm_4x8x4_i8i8i32_rm_rm
@@ -99,19 +100,39 @@ ime_i8_gemm_4x8x4_i8i8i32_acc:
 ime_i8_gemm_4x8x4_i8i8i32_rm_rm:
     beqz        a3, .L_rm_rm_return
 
-    // C 타일 누산기(v28) 0으로 초기화
+    // C Index Vector (v24) 계산
+    ld          t3, 0(sp)          // t3 = ldc
+    slli        t3, t3, 2          // t3 = ldc * 4 (bytes per row)
     vsetvli     t0, zero, e32, m2
+    vid.v       v24
+    vsrl.vi     v20, v24, 2        // v20 = row = vid / 4
+    vand.vi     v22, v24, 3        // v22 = col = vid % 4
+    vmul.vx     v26, v20, t3       // v26 = row * (ldc * 4)
+    vsll.vi     v22, v22, 2        // v22 = col * 4
+    vadd.vv     v24, v26, v22      // v24 = byte offset for C
+
+    // C 타일 누산기(v28) 0으로 초기화
     vxor.vv     v28, v28, v28
-    j           .L_rm_rm_setup
+    j           .L_rm_rm_setup_ab
 
 ime_i8_gemm_4x8x4_i8i8i32_rm_rm_acc:
     beqz        a3, .L_rm_rm_return
 
-    // 기존 C 타일 로드
+    // C Index Vector (v24) 계산
+    ld          t3, 0(sp)          // t3 = ldc
+    slli        t3, t3, 2          // t3 = ldc * 4 (bytes per row)
     vsetvli     t0, zero, e32, m2
-    vle32.v     v28, (a2)
+    vid.v       v24
+    vsrl.vi     v20, v24, 2
+    vand.vi     v22, v24, 3
+    vmul.vx     v26, v20, t3
+    vsll.vi     v22, v22, 2
+    vadd.vv     v24, v26, v22
 
-.L_rm_rm_setup:
+    // 기존 C 타일 로드 (Indexed Load)
+    vluxei32.v  v28, (a2), v24
+
+.L_rm_rm_setup_ab:
     // A Index Vector (v4): offset = (vid / 8) * lda + (vid % 8)
     vsetvli     t0, zero, e32, m4
     vid.v       v4
@@ -143,9 +164,9 @@ ime_i8_gemm_4x8x4_i8i8i32_rm_rm_acc:
 
     bnez        a3, .L_rm_rm_loop
 
-    // 최종 결과 저장
+    // 최종 결과 저장 (Indexed Store)
     vsetvli     t0, zero, e32, m2
-    vse32.v     v28, (a2)
+    vsoxei32.v  v28, (a2), v24
 
 .L_rm_rm_return:
     ret
@@ -162,7 +183,8 @@ ime_i8_gemm_4x8x4_i8i8i32_rm_rm_acc:
 //     size_t A_K_stride,        // a4
 //     size_t B_K_stride,        // a5
 //     size_t lda,               // a6
-//     size_t ldb                // a7
+//     size_t ldb,               // a7
+//     size_t ldc                // 0(sp)
 // );
 
     .global ime_i8_gemm_4x8x4_i8i8i32_rm_cm
@@ -174,17 +196,39 @@ ime_i8_gemm_4x8x4_i8i8i32_rm_rm_acc:
 ime_i8_gemm_4x8x4_i8i8i32_rm_cm:
     beqz        a3, .L_rm_cm_return
 
+    // C Index Vector (v24) 계산
+    ld          t3, 0(sp)          // t3 = ldc
+    slli        t3, t3, 2          // t3 = ldc * 4 (bytes per row)
     vsetvli     t0, zero, e32, m2
+    vid.v       v24
+    vsrl.vi     v20, v24, 2        // v20 = row = vid / 4
+    vand.vi     v22, v24, 3        // v22 = col = vid % 4
+    vmul.vx     v26, v20, t3       // v26 = row * (ldc * 4)
+    vsll.vi     v22, v22, 2        // v22 = col * 4
+    vadd.vv     v24, v26, v22      // v24 = byte offset for C
+
+    // C 타일 누산기 0으로 초기화
     vxor.vv     v28, v28, v28
-    j           .L_rm_cm_setup
+    j           .L_rm_cm_setup_ab
 
 ime_i8_gemm_4x8x4_i8i8i32_rm_cm_acc:
     beqz        a3, .L_rm_cm_return
 
+    // C Index Vector (v24) 계산
+    ld          t3, 0(sp)          // t3 = ldc
+    slli        t3, t3, 2          // t3 = ldc * 4 (bytes per row)
     vsetvli     t0, zero, e32, m2
-    vle32.v     v28, (a2)
+    vid.v       v24
+    vsrl.vi     v20, v24, 2
+    vand.vi     v22, v24, 3
+    vmul.vx     v26, v20, t3
+    vsll.vi     v22, v22, 2
+    vadd.vv     v24, v26, v22
 
-.L_rm_cm_setup:
+    // 기존 C 타일 로드 (Indexed Load)
+    vluxei32.v  v28, (a2), v24
+
+.L_rm_cm_setup_ab:
     // A Index Vector (v4): offset = (vid / 8) * lda + (vid % 8)
     vsetvli     t0, zero, e32, m4
     vid.v       v4
@@ -213,8 +257,110 @@ ime_i8_gemm_4x8x4_i8i8i32_rm_cm_acc:
 
     bnez        a3, .L_rm_cm_loop
 
+    // 최종 결과 저장 (Indexed Store)
+    vsetvli     t0, zero, e32, m2
+    vsoxei32.v  v28, (a2), v24
+
+.L_rm_cm_return:
+    ret
+
+// ============================================================================
+// Convolution 3x3 Microkernel (Sliding Window vmadotn)
+// ============================================================================
+// C ABI Signature:
+// void ime_i8_conv2d_3x3_4x4_tile_i8i8i32_acc(
+//     const int8_t *Act,        // a0: [N, C_in/8, H, W, 8]
+//     const int8_t *Weight,     // a1: [F/4, C_in/8, KH, KW, 4, 8]
+//     int32_t *Out,             // a2: [N, F/4, Ho, Wo, 4]
+//     size_t num_C,             // a3: C_in / 8
+//     size_t act_C_stride,      // a4
+//     size_t weight_C_stride,   // a5
+//     size_t act_H_stride,      // a6
+//     size_t act_W_stride       // a7
+// );
+// Computes a 4x4 output tile (4 spatial pixels along W, 4 filters along F)
+// using vmadot, vmadot1, vmadot2.
+
+    .global ime_i8_conv2d_3x3_4x4_tile_i8i8i32_acc
+    .type ime_i8_conv2d_3x3_4x4_tile_i8i8i32_acc, @function
+    .align 2
+
+ime_i8_conv2d_3x3_4x4_tile_i8i8i32_acc:
+    beqz        a3, .L_conv_return
+
+    // Load existing Out (4x4 tile) into v28
+    vsetvli     t0, zero, e32, m2
+    vle32.v     v28, (a2)
+
+.L_conv_c_loop:
+    // C loop setup
+    mv          t1, a0       // t1 = Act_ptr for this c_in block
+    mv          t2, a1       // t2 = Weight_ptr for this c_in block
+    
+    // Kh = 0
+    // Kw = 0, 1, 2
+    // We load Act for H=0. We need W=0..5 (6 pixels).
+    // vle8.v with m2 loads 64 bytes (8 pixels = W=0..7). This is enough for kw=0,1,2.
+    vsetvli     t0, zero, e8, m2
+    vle8.v      v0, (t1)            // v0, v1 = Act[H=0, W=0..7]
+    
+    vsetvli     t0, zero, e8, m1
+    vle8.v      v4, (t2)            // v4 = Weight[KH=0, KW=0]
+    vmadot      v28, v0, v4
+    addi        t2, t2, 32
+    
+    vle8.v      v5, (t2)            // v5 = Weight[KH=0, KW=1]
+    vmadot1     v28, v0, v5
+    addi        t2, t2, 32
+    
+    vle8.v      v6, (t2)            // v6 = Weight[KH=0, KW=2]
+    vmadot2     v28, v0, v6
+    addi        t2, t2, 32
+    
+    // Kh = 1
+    add         t1, t1, a6          // t1 += act_H_stride
+    vsetvli     t0, zero, e8, m2
+    vle8.v      v0, (t1)            // v0, v1 = Act[H=1, W=0..7]
+    
+    vsetvli     t0, zero, e8, m1
+    vle8.v      v4, (t2)            // v4 = Weight[KH=1, KW=0]
+    vmadot      v28, v0, v4
+    addi        t2, t2, 32
+    
+    vle8.v      v5, (t2)            // v5 = Weight[KH=1, KW=1]
+    vmadot1     v28, v0, v5
+    addi        t2, t2, 32
+    
+    vle8.v      v6, (t2)            // v6 = Weight[KH=1, KW=2]
+    vmadot2     v28, v0, v6
+    addi        t2, t2, 32
+    
+    // Kh = 2
+    add         t1, t1, a6          // t1 += act_H_stride
+    vsetvli     t0, zero, e8, m2
+    vle8.v      v0, (t1)            // v0, v1 = Act[H=2, W=0..7]
+    
+    vsetvli     t0, zero, e8, m1
+    vle8.v      v4, (t2)            // v4 = Weight[KH=2, KW=0]
+    vmadot      v28, v0, v4
+    addi        t2, t2, 32
+    
+    vle8.v      v5, (t2)            // v5 = Weight[KH=2, KW=1]
+    vmadot1     v28, v0, v5
+    addi        t2, t2, 32
+    
+    vle8.v      v6, (t2)            // v6 = Weight[KH=2, KW=2]
+    vmadot2     v28, v0, v6
+    
+    // Advance to next C_in block
+    add         a0, a0, a4          // Act_ptr += act_C_stride
+    add         a1, a1, a5          // Weight_ptr += weight_C_stride
+    addi        a3, a3, -1
+    bnez        a3, .L_conv_c_loop
+    
+    // Save Out
     vsetvli     t0, zero, e32, m2
     vse32.v     v28, (a2)
 
-.L_rm_cm_return:
+.L_conv_return:
     ret

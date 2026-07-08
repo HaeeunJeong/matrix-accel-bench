@@ -53,7 +53,8 @@ void ime_i8_gemm_4x8x4_i8i8i32_rm_rm(
     size_t A_K_stride,        // a4: 다음 K 타일로 이동 시 A 주소 증가량 (보통 8)
     size_t B_K_stride,        // a5: 다음 K 타일로 이동 시 B 주소 증가량 (보통 8 * ldb)
     size_t lda,               // a6: A 행렬의 열 개수 (Leading Dimension of A)
-    size_t ldb                // a7: B 행렬의 열 개수 (Leading Dimension of B)
+    size_t ldb,               // a7: B 행렬의 열 개수 (Leading Dimension of B)
+    size_t ldc                // 스택(0(sp)): C 행렬의 열 개수 (Leading Dimension of C)
 );
 
 // 누적 버전
@@ -66,14 +67,35 @@ void ime_i8_gemm_4x8x4_i8i8i32_rm_rm_acc(...);
 ```c
 void ime_i8_gemm_4x8x4_i8i8i32_rm_cm(
     const int8_t *A, const int8_t *B, int32_t *C_tile, 
-    size_t num_K, size_t A_K_stride, size_t B_K_stride, size_t lda, size_t ldb
+    size_t num_K, size_t A_K_stride, size_t B_K_stride, 
+    size_t lda, size_t ldb, size_t ldc
 );
 
 // 누적 버전
 void ime_i8_gemm_4x8x4_i8i8i32_rm_cm_acc(...);
 ```
 
-### D. Calling Convention (호출 규약)
+### D. Convolution 3x3 Microkernel (Sliding Window vmadotn)
+RISC-V Zvvm (SpacemiT AI) 확장의 핵심인 `vmadotN` 명령어(Sliding Window)를 활용하여 2D Convolution 연산을 최적화한 마이크로커널입니다. 3x3 가중치 커널을 사용하여 한 번에 4x4 크기의 출력 타일(Output Width 4픽셀 × Filter 4채널)을 계산합니다.
+
+```c
+void ime_i8_conv2d_3x3_4x4_tile_i8i8i32_acc(
+    const int8_t *Act,        // a0: [N, C_in/8, H, W, 8]
+    const int8_t *Weight,     // a1: [F/4, C_in/8, KH, KW, 4, 8]
+    int32_t *Out,             // a2: [N, F/4, Ho, Wo, 4]
+    size_t num_C,             // a3: C_in / 8 차원 루프 횟수
+    size_t act_C_stride,      // a4: 다음 C_in 블록 이동 시 Act 주소 증가량 (bytes)
+    size_t weight_C_stride,   // a5: 다음 C_in 블록 이동 시 Weight 주소 증가량 (bytes)
+    size_t act_H_stride,      // a6: 다음 H 줄로 이동 시 Act 주소 증가량 (bytes)
+    size_t act_W_stride       // a7: (미사용, 향후 확장용)
+);
+```
+- **특징**: 
+  - 입력 Activation(Act)을 단 한 번만 로드(`vle8.v`, `LMUL=2`)하여 64바이트(8 픽셀)를 벡터 레지스터에 넉넉히 올립니다.
+  - 이후 `vmadot`, `vmadot1`, `vmadot2` 등 명령어 레벨의 시프트(오프셋) 연산을 사용하여, **메모리 재접근이나 추가적인 레지스터 이동(vslide 등) 없이 하드웨어적으로 슬라이딩 윈도우 내적 연산을 수행**합니다.
+  - 이로 인해 Unaligned load나 Im2Col 오버헤드를 원천 차단하여 극도의 Compute-Bound 성능을 달성합니다.
+
+### E. Calling Convention (호출 규약)
 - 본 바이너리는 **RISC-V 표준 C ABI**를 완벽하게 준수합니다.
 - 함수 내부에서 Caller-saved 레지스터(스칼라 및 벡터 레지스터 포함)를 사용할 수 있으므로, 컴파일러는 ABI 규약에 따라 레지스터를 보존(Save/Restore)해야 합니다.
 - 스택(Stack) 메모리를 전혀 사용하지 않는 Leaf function으로 구현되어 있어 함수 호출 오버헤드가 극히 낮습니다.
@@ -98,9 +120,15 @@ Corenelia 백엔드는 `linalg.matmul`을 이 커널로 lowering 할 때 **사�
 
 ### C. Matrix C (Int32)
 - **Shape**: $4 \times 4$ (Ti=4, Tj=4)
-- **Layout**: **반드시 연속된 64바이트(Contiguous Physical Layout)**여야 합니다.
-- **이유**: 최상의 성능을 내기 위해 라이브러리 내부에서 단일 벡터 메모리 명령어를 사용하여 16개의 int32 값을 한 번에 기록합니다. 만약 C가 큰 $M \times N$ 행렬의 부분 뷰(Sub-view) 형태라면 Stride가 발생하므로 이 커널에 포인터를 직접 넘겨줄 수 없습니다. 
-- **해결책**: Corenelia 컴파일러는 타일 루프를 구성할 때 C 텐서 역시 Virtual Dimension 구조로 미리 패킹해두거나, Scratch Buffer(64바이트) 포인터를 커널에 넘겨 결과를 받은 뒤 Scatter 방식으로 본래 메모리에 쓰는 별도의 로직을 추가해야 합니다.
+- **Layout**: 
+  - **Pre-packed 모드**: **반드시 연속된 64바이트(Contiguous Physical Layout)**여야 합니다. 이 모드는 최고의 하드웨어 한계 성능 측정을 목표로 하므로, `vse32.v`를 사용해 단일 사이클로 결과를 쏟아냅니다. C가 큰 $M \times N$ 행렬의 부분 뷰일 경우 임시 버퍼 포인터를 넘겨야 합니다.
+  - **RM-RM / RM-CM 모드**: 이 커널들은 Packed 레이아웃을 쓰지 않았을 때의 진정한 "메모리 접근 오버헤드"를 벤치마킹하기 위해 존재합니다. 따라서 C 타일 역시 `ldc` 값을 넘겨주면 커널 내부에서 `vsoxei32.v` (Indexed Store)를 이용해 런타임에 직접 $M \times N$ 행렬의 원래 위치로 분산 저장(Scatter)합니다. (오버헤드가 정확히 포함됩니다)
+
+### D. Convolution Input/Weight/Output Layout
+Convolution 커널(`ime_i8_conv2d_3x3_4x4_tile_i8i8i32_acc`)에 적용되는 레이아웃 제약 사항입니다.
+- **Act (입력 픽셀)**: `[N, C_in/8, H, W, 8]` 구조. C_in 채널이 8바이트 단위로 패킹되어 있으며, 메모리 상에 가로(W) 픽셀들이 8바이트(채널 패킹) 단위로 연속적으로 배치되어야 `vmadot1` 등의 슬라이딩 윈도우 연산이 정확히 1 픽셀씩 시프트하며 올바르게 작동합니다.
+- **Weight (가중치)**: `[F/4, C_in/8, KH, KW, 4, 8]` 구조. 4개의 필터 타일이 32바이트(4 필터 x 8 입력 채널) 단위로 연속적으로 저장되어 있어야 합니다.
+- **Output (출력)**: `[N, F/4, Ho, Wo, 4]` 구조. $4 \times 4$ 타일(64바이트)이 물리적으로 연속되어야 단일 쓰기 명령(`vse32.v`)으로 처리 가능합니다.
 
 ---
 
